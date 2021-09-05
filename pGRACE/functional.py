@@ -71,6 +71,7 @@ def degree_drop_weights(edge_index):
     # print(edge_index_.size())
     # print(edge_index_[1].size()) #491722
     deg = degree(edge_index_[1]) #计算每个节点的度 size (13752)
+    print("deg",deg)
     deg_col = deg[edge_index[1]].to(torch.float32)
     #print(deg_col.size()) 491722
     s_col = torch.log(deg_col)

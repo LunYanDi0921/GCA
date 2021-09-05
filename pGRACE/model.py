@@ -11,7 +11,6 @@ class Encoder(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, activation, base_model=GCNConv, k: int = 2, skip=False):
         super(Encoder, self).__init__()
         self.base_model = base_model
-        print("jjjjj")
         assert k >= 2
         self.k = k
         self.skip = skip
@@ -21,7 +20,7 @@ class Encoder(nn.Module):
                 self.conv.append(base_model(2 * out_channels, 2 * out_channels))
             self.conv.append(base_model(2 * out_channels, out_channels))
             self.conv = nn.ModuleList(self.conv)
-            print(self.conv)
+            # print(self.conv)
             self.activation = activation
         else:
             self.fc_skip = nn.Linear(in_channels, out_channels)
@@ -55,6 +54,10 @@ class GRACE(torch.nn.Module):
         self.fc1 = torch.nn.Linear(num_hidden, num_proj_hidden)
         self.fc2 = torch.nn.Linear(num_proj_hidden, num_hidden)
         self.num_hidden = num_hidden
+        self.neighbor1 = {}
+        self.neighbor2 = {}
+        self.similarity1 = {}
+        self.similarity2 = {}
 
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         return self.encoder(x, edge_index)
@@ -100,93 +103,142 @@ class GRACE(torch.nn.Module):
     # def loss(self, z1: torch.Tensor, z2: torch.Tensor, mean: bool = True, batch_size: Optional[int] = None):
     #     h1 = self.projection(z1)
     #     h2 = self.projection(z2)
-    #
+    
     #     if batch_size is None:
     #         l1 = self.semi_loss(h1, h2)
     #         l2 = self.semi_loss(h2, h1)
     #     else:
     #         l1 = self.batched_semi_loss(h1, h2, batch_size)
     #         l2 = self.batched_semi_loss(h2, h1, batch_size)
-    #
+    
     #     ret = (l1 + l2) * 0.5
     #     ret = ret.mean() if mean else ret.sum()
-    #
+    
     #     return ret
-    def cal_hard_negative_sample_part_1(self,edge_index,index):
-        #计算困难负样本第一部分 某个样本的一阶邻居
-        print(edge_index)
-        hnsp1 = edge_index[:,edge_index[0, :] == index]
-        hnsp1 = hnsp1[1,:]
-        return hnsp1 #返回节点i的邻居节点下标
-    def cal_hard_negative_sample_part_2(self,z,z_index,index,k,hnsp1):
-         #计算困难负样本第二部分 根据特征表示的相似度 返回相似度高的前k个节点的特征表示
-         device = z.device
-         #z_index = z[index,:] #节点index的特征表示
-         # print(z_index.size())
-         #left是除了节点index本身和其一阶邻居之外的其他节点下标
-         left = torch.tensor([i for i in range(z.size(0)) if i not in hnsp1 and i != index],dtype=int)
-         # print(left.size())
-         z_left = z[left,:]
-         # print(z_left.size())
-         # print(z)
-         # print(z_left)
-         # print(z_index - z_left)
-         # print((z_index - z_left).size())
-         dis = (z_index - z_left).pow(2).sum(1).sqrt()
-         # print("z_left.size()",z_left.size()) #[13749,128]
-         # print("dis.size()", dis.size()) #[13749]
-         dis = dis.view(-1,1).to(device)
-         left = left.view(-1,1).to(device)
-         dis = torch.cat([dis, left], dim=1).to(device)
-         dis = dis[dis.argsort(descending= True,dim=0)[:,0],:]
-         dis_k_index = dis[0:k,1].int()
-         # print("*",dis)
-         # print("*", dis_k_index)
-         hnsp2 = dis_k_index
-         return hnsp2
-    def generate_hard_negative_sample_1(self,hnsp1,hnsp2,z,z_index,alpha):
-        # hnsp1 = hnsp1.view(-1,1)
-        # hnsp2 = hnsp2.view(-1, 1)
-        hnsp = torch.cat([hnsp1,hnsp2])
-        z_hnsp = z[hnsp,:] #本身的困难负样本
-        gene_hns = alpha * z_index + (1 - alpha) * z_hnsp #生成的困难负样本
-        hns = torch.cat([z_hnsp, gene_hns], dim=0)
-        return hns
 
-    # def  generate_hard_sample_2(self,hnsp1,hnsp2,z,q,beta):
-    #     hnsp = torch.cat([hnsp1, hnsp2])
-    #     z_hnsp = z[hnsp, :]
-    #     return beta * q + (1 - beta) * z_hnsp
+    def loss(self,z1: torch.Tensor, z2: torch.Tensor,edge_index_1,edge_index_2,k,epoch,interval):
+        f = lambda x: torch.exp(x / self.tau)
+        pairs = f(self.sim(z1, z2))
+        if epoch % interval == 1:
+          refl_sim = self.sim(z1, z1) #图内相似度
+          between_sim = self.sim(z1, z2) #图间相似度
+          refl_sim = refl_sim.argsort(descending= True,dim=1) #按相似度降序排序
+          between_sim = between_sim.argsort(descending=True, dim=1)
+        #print(refl_sim.size(),between_sim.size())
+        device = z1.device
+        l = 0
+        for i in range(z1.size(0)):
+            #该节点的一阶邻居
+            #print(i)
+            #边结构使用第一轮次边结构
+            if epoch == 1 :#如果是第一轮循环
+               neighbor1 = edge_index_1[1, edge_index_1[0, :] == i]
+            #该节点在另一个图的对应节点的一阶邻居
+               neighbor2  = edge_index_2[1, edge_index_2[0, :] == i]
+               self.neighbor1[i] = neighbor1
+               self.neighbor2[i] = neighbor2
+            # print(neighbor1)
+            # print(neighbor2)
+            #更新最相似节点
+            if epoch % interval == 1:
+                self.similarity1[i] = refl_sim[i,0:k]
+                self.similarity2[i] = between_sim[i,0:k]
 
-    def loss(self,z1:torch.Tensor, z2: torch.Tensor, edge_index_1:torch.Tensor,  edge_index_2: torch.Tensor,k):
-           l = 0
-           device = z1.device
-           for i in range(z1.size(0)):
-               print(i)
-               #遍历每一个节点
-               z1_index = z1[i, :]
-               intra_hnsp1 = self.cal_hard_negative_sample_part_1(edge_index_1,i)
-               print(intra_hnsp1)
-               # (self, z, z_index, index, k, hnsp1)
-               intra_hnsp2 = self.cal_hard_negative_sample_part_2(z1, z1_index,i,k, intra_hnsp1 )
-               print(intra_hnsp2)
-               alpha = torch.rand(1).to(device)
-               intra_negative = self.generate_hard_negative_sample_1(intra_hnsp1,intra_hnsp2,z1,z1_index,alpha)
-               print(intra_negative.size())
-               #intra_dis = torch.exp(torch.sqrt(torch.mm(z1_index.view(1,-1),intra_negative.t()))/self.tau).sum()
-               intra_dis = torch.exp((z1_index - intra_negative).pow(2).sum(1).sqrt() / self.tau).sum()
-               inter_hnsp1 = self.cal_hard_negative_sample_part_1(edge_index_2, i)
-               print(inter_hnsp1)
-               inter_hnsp2 = self.cal_hard_negative_sample_part_2(z2, z1_index,i, k, inter_hnsp1)
-               print(inter_hnsp2)
-               # beta = torch.rand()/2
-               z2_index = z2[i, :]
-               inter_negative = self.generate_hard_negative_sample_1(inter_hnsp1, inter_hnsp2, z2, z1_index, alpha)
-               inter_dis = torch.exp((z1_index - inter_negative).pow(2).sum(1).sqrt() / self.tau).sum()
-               # inter_dis = torch.exp(torch.sqrt(torch.mm(z2_index.view(1, -1), inter_negative.t())) / self.tau).sum()
-               d = torch.exp((z1_index - z2_index).pow(2).sum().sqrt() / self.tau)
-               l += torch.log(d / ( d + intra_dis + inter_dis))
-           return l
+            neg1 = torch.cat([self.neighbor1[i],self.similarity1[i]])
+            neg2 = torch.cat([self.neighbor2[i],self.similarity2[i]])
+            # print(neg1)
+            # print(neg2)
+            alpha = torch.rand(1).to(device)
+            gene_neg1 =  alpha * z1[i,:].view(1,-1) + (1 - alpha) * z1[neg1,:]
+            gene_neg2 =  alpha * z1[i,:].view(1,-1) + (1 - alpha) * z2[neg2,:]
+            hnsp1 = torch.cat([z1[neg1,:], gene_neg1], dim=0)
+            hnsp2 = torch.cat([z2[neg2,:], gene_neg2], dim=0)
+            hnsp1_sim = self.sim(z1[i,:].view(1,-1),hnsp1)
+            hnsp2_sim = self.sim(z1[i,:].view(1,-1),hnsp2)
+            # print(hnsp1_sim)
+            # print(hnsp2_sim)
+            d1 = f( hnsp1_sim).sum()
+            d2 = f( hnsp2_sim).sum()
+            l+= - torch.log(pairs[i,i] / (pairs[i,i] + d1 + d2) +1e-5)
+        print(l)
+        return l
+
+    # def cal_hard_negative_sample_part_1(self,edge_index,index):
+    #     #计算困难负样本第一部分 某个样本的一阶邻居
+    #     # print(edge_index)
+    #     hnsp1 = edge_index[:,edge_index[0, :] == index]
+    #     hnsp1 = hnsp1[1,:]
+    #     return hnsp1 #返回节点i的邻居节点下标
+    # def cal_hard_negative_sample_part_2(self,z,z_index,index,k,hnsp1):
+    #      #计算困难负样本第二部分 根据特征表示的相似度 返回相似度高的前k个节点的特征表示
+    #      device = z.device
+    #      #z_index = z[index,:] #节点index的特征表示
+    #      # print(z_index.size())
+    #      #left是除了节点index本身和其一阶邻居之外的其他节点下标
+    #      left = torch.tensor([i for i in range(z.size(0)) if i not in hnsp1 and i != index],dtype=int)
+    #      # print(left.size())
+    #      z_left = z[left,:]
+    #      # print(z_left.size())
+    #      # print(z)
+    #      # print(z_left)
+    #      # print(z_index - z_left)
+    #      # print((z_index - z_left).size())
+    #      dis = (z_index - z_left).pow(2).sum(1).sqrt()
+    #      # print("z_left.size()",z_left.size()) #[13749,128]
+    #      # print("dis.size()", dis.size()) #[13749]
+    #      dis = dis.view(-1,1).to(device)
+    #      left = left.view(-1,1).to(device)
+    #      dis = torch.cat([dis, left], dim=1).to(device)
+    #      dis = dis[dis.argsort(descending= True,dim=0)[:,0],:]
+    #      dis_k_index = dis[0:k,1].int()
+    #      # print("*",dis)
+    #      # print("*", dis_k_index)
+    #      hnsp2 = dis_k_index
+    #      return hnsp2
+    # def generate_hard_negative_sample_1(self,hnsp1,hnsp2,z,z_index,alpha):
+    #     # hnsp1 = hnsp1.view(-1,1)
+    #     # hnsp2 = hnsp2.view(-1, 1)
+    #     hnsp = torch.cat([hnsp1,hnsp2])
+    #     z_hnsp = z[hnsp,:] #本身的困难负样本
+    #     gene_hns = alpha * z_index + (1 - alpha) * z_hnsp #生成的困难负样本
+    #     hns = torch.cat([z_hnsp, gene_hns], dim=0)
+    #     return hns
+    #
+    # # def  generate_hard_sample_2(self,hnsp1,hnsp2,z,q,beta):
+    # #     hnsp = torch.cat([hnsp1, hnsp2])
+    # #     z_hnsp = z[hnsp, :]
+    # #     return beta * q + (1 - beta) * z_hnsp
+    #
+    # def loss(self,z1:torch.Tensor, z2: torch.Tensor, edge_index_1:torch.Tensor,  edge_index_2: torch.Tensor,k):
+    #        l = 0
+    #        device = z1.device
+    #
+    #        for i in range(z1.size(0)):
+    #            print(i)
+    #            #遍历每一个节点
+    #            z1_index = z1[i, :]
+    #            intra_hnsp1 = self.cal_hard_negative_sample_part_1(edge_index_1,i)
+    #            # print(intra_hnsp1)
+    #            # (self, z, z_index, index, k, hnsp1)
+    #            intra_hnsp2 = self.cal_hard_negative_sample_part_2(z1, z1_index,i,k, intra_hnsp1 )
+    #            # print(intra_hnsp2)
+    #            alpha = torch.rand(1).to(device)
+    #            intra_negative = self.generate_hard_negative_sample_1(intra_hnsp1,intra_hnsp2,z1,z1_index,alpha)
+    #            # print(intra_negative.size())
+    #            #intra_dis = torch.exp(torch.sqrt(torch.mm(z1_index.view(1,-1),intra_negative.t()))/self.tau).sum()
+    #            intra_dis = torch.exp((z1_index - intra_negative).pow(2).sum(1).sqrt() / self.tau).sum()
+    #            inter_hnsp1 = self.cal_hard_negative_sample_part_1(edge_index_2, i)
+    #            # print(inter_hnsp1)
+    #            inter_hnsp2 = self.cal_hard_negative_sample_part_2(z2, z1_index,i, k, inter_hnsp1)
+    #            # print(inter_hnsp2)
+    #            # beta = torch.rand()/2
+    #            z2_index = z2[i, :]
+    #            inter_negative = self.generate_hard_negative_sample_1(inter_hnsp1, inter_hnsp2, z2, z1_index, alpha)
+    #            inter_dis = torch.exp((z1_index - inter_negative).pow(2).sum(1).sqrt() / self.tau).sum()
+    #            # inter_dis = torch.exp(torch.sqrt(torch.mm(z2_index.view(1, -1), inter_negative.t())) / self.tau).sum()
+    #            d = torch.exp((z1_index - z2_index).pow(2).sum().sqrt() / self.tau)
+    #            l += torch.log(d / ( d + intra_dis + inter_dis))
+    #        return l
 
 class LogReg(nn.Module):
     def __init__(self, ft_in, nb_classes):

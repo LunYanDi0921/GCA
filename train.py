@@ -3,6 +3,7 @@ import argparse
 import os.path as osp
 import random
 import nni
+import time
 
 import torch
 from torch_geometric.utils import dropout_adj, degree, to_undirected
@@ -21,7 +22,7 @@ from pGRACE.dataset import get_dataset
 print(torch.version.cuda)
 print(torch.cuda.is_available())
 print(torch.cuda.device_count())
-def train():
+def train(epoch):
     model.train()
     optimizer.zero_grad()
 
@@ -40,24 +41,24 @@ def train():
     edge_index_2 = drop_edge(2)
     print(edge_index_2.size())
     x_1 = drop_feature(data.x, param['drop_feature_rate_1'])
-    print(x_1.size())
+    # print(x_1.size())
     x_2 = drop_feature(data.x, param['drop_feature_rate_2'])
-    print(x_2.size())
+    # print(x_2.size())
     if param['drop_scheme'] in ['pr', 'degree', 'evc']:
         x_1 = drop_feature_weighted_2(data.x, feature_weights, param['drop_feature_rate_1'])
         x_2 = drop_feature_weighted_2(data.x, feature_weights, param['drop_feature_rate_2'])
-    print(x_1.size())
-    print(x_2.size())
+    # print(x_1.size())
+    # print(x_2.size())
     z1 = model(x_1, edge_index_1)
     z2 = model(x_2, edge_index_2)
-    print(z1.size(0)) #torch.Size([13752, 128])
-    print(z2.size()) #torch.Size([13752, 128])
+    # print(z1.size(0)) #torch.Size([13752, 128])
+    # print(z2.size()) #torch.Size([13752, 128])
 
     #loss = model.loss(z1, z2, batch_size=1024 if args.dataset == 'Coauthor-Phy' else None)
-    loss = model.loss(z1, z2,edge_index_1,edge_index_2,20)
+    loss = model.loss(z1, z2,edge_index_1,edge_index_2,20,epoch,1000)
+    print(loss)
     loss.backward()
     optimizer.step()
-
     return loss.item()
 
 
@@ -91,7 +92,7 @@ if __name__ == '__main__':
     # 使用parse_args() 解析添加的参数
     #使用 argparse 的第一步是创建一个 ArgumentParser 对象 创建解析器
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', type=str, default='cuda:0')
+    parser.add_argument('--device', type=str, default='cuda:1')
     parser.add_argument('--dataset', type=str, default='Amazon-Computers')
     parser.add_argument('--param', type=str, default='local:amazon_computers.json')
     parser.add_argument('--seed', type=int, default=39788)
@@ -100,7 +101,7 @@ if __name__ == '__main__':
     parser.add_argument('--load_split', type=str, nargs='?')
     default_param = {
         #学习率
-        'learning_rate': 0.01,
+        'learning_rate': 0.1,
         'num_hidden': 256,
         'num_proj_hidden': 32,
         'activation': 'prelu',
@@ -111,7 +112,7 @@ if __name__ == '__main__':
         'drop_feature_rate_1': 0.1,
         'drop_feature_rate_2': 0.0,
         'tau': 0.4,
-        'num_epochs': 3000,
+        'num_epochs': 1,
         'weight_decay': 1e-5,
         'drop_scheme': 'degree',
     }
@@ -121,14 +122,16 @@ if __name__ == '__main__':
     for key in param_keys:
         parser.add_argument(f'--{key}', type=type(default_param[key]), nargs='?')
     args = parser.parse_args()
+    print(args)
     #print(args['dataset'])
     # parse param
-    print(default_param)
+    # print(default_param)
     sp = SimpleParam(default=default_param)
-    print(args.param)
+    # print(args.param)
     param = sp(source=args.param, preprocess='nni')
+
     print(param)
-    print(args)
+    # print(args)
     # merge cli arguments and parsed param
     for key in param_keys:
         if getattr(args, key) is not None:
@@ -141,19 +144,21 @@ if __name__ == '__main__':
     torch_seed = args.seed
     torch.manual_seed(torch_seed)
     random.seed(12345)
-    print(args.device)
+    # print(args.device)
     device = torch.device(args.device)
 
     path = osp.expanduser('~/datasets')
     path = osp.join(path, args.dataset)
-    print(path)
+    # print(path)
     dataset = get_dataset(path, args.dataset)
+    print(dataset)
     data = dataset[0]
     data = data.to(device)  #Data(edge_index=[2, 491722], x=[13752, 767], y=[13752])
-    print(data.num_nodes)
-    print(data.num_edges)
+    # print(data.num_nodes)
+    # print(data.num_edges)
 
     # generate split
+    #将节点划分为训练集 验证集 测试集 返回一个长为num_nodes的tensor 以训练集为例 tensor中训练样本所对应的下标位置的值是ture 否则为false 
     split = generate_split(data.num_nodes, train_ratio=0.1, val_ratio=0.1)
     # print(split)
     # print(args.save_split)
@@ -169,7 +174,7 @@ if __name__ == '__main__':
     optimizer = torch.optim.Adam(
         model.parameters(),
         lr=param['learning_rate'],
-        weight_decay=param['weight_decay']
+        weight_decay=param['weight_decay'] #权重衰减(如L2惩罚)(默认: 0)
     )
 
     if param['drop_scheme'] == 'degree':
@@ -206,17 +211,24 @@ if __name__ == '__main__':
     print("feature_weights.size",feature_weights.size())
 
     log = args.verbose.split(',')
-
+    param['num_epochs'] =3000
     for epoch in range(1, param['num_epochs'] + 1):
-        loss = train()
+        time_start = time.time()
+        loss = train(epoch)
+        time_end = time.time()    #结束计时
+        time_c= time_end - time_start   #运行所花时间
+        print('time cost', time_c, 's')
         if 'train' in log:
             print(f'(T) | Epoch={epoch:03d}, loss={loss:.4f}')
+        acc = test()
 
-        if epoch % 100 == 0:
-            acc = test()
+        if 'eval' in log:
+            print(f'(E) | Epoch={epoch:04d}, avg_acc = {acc}')
+        # if epoch % 100 == 0:
+        #     acc = test()
 
-            if 'eval' in log:
-                print(f'(E) | Epoch={epoch:04d}, avg_acc = {acc}')
+        #     if 'eval' in log:
+        #         print(f'(E) | Epoch={epoch:04d}, avg_acc = {acc}')
 
     acc = test(final=True)
 
